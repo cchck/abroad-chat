@@ -1,0 +1,625 @@
+"use client";
+
+import { useEffect, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import ProfilePanel from "@/components/panels/profile-panel";
+import ApiKeysPanel from "@/components/panels/api-keys-panel";
+import PersonaPanel from "@/components/panels/persona-panel";
+import MaterialsPanel from "@/components/panels/materials-panel";
+import BindingsPanel from "@/components/panels/bindings-panel";
+import NotificationsPanel from "@/components/panels/notifications-panel";
+import { api, type StudentProfile, type AppNotification, type ChatSummary } from "@/lib/api";
+import {
+  User, Key, MessageSquare, FileText, Users, Bell,
+  X, LogOut, CheckCircle2, Lock, ChevronRight,
+  AlertTriangle, Sparkles, Settings2, Send, Lightbulb,
+  Trash2, Megaphone,
+} from "lucide-react";
+import { api as materialApi, type Material } from "@/lib/api";
+
+type PanelId = "profile" | "api-keys" | "persona" | "materials" | "bindings" | "notifications" | null;
+
+interface SetupStep {
+  id: PanelId;
+  title: string;
+  subtitle: string;
+  icon: typeof User;
+  iconColor: string;
+  check: (p: StudentProfile) => boolean;
+}
+
+const SETUP_STEPS: SetupStep[] = [
+  { id: "api-keys", title: "配置 AI 模型", subtitle: "选择模型提供商并填写 API Key", icon: Key, iconColor: "text-amber-500 bg-amber-50", check: (p) => !!p.has_llm_key },
+  { id: "profile", title: "完善个人资料", subtitle: "填写学校、城市等基本信息", icon: User, iconColor: "text-sky-500 bg-sky-50", check: (p) => !!(p.school && p.city) },
+  { id: "persona", title: "设置说话风格", subtitle: "上传聊天记录让 AI 学习你的风格", icon: MessageSquare, iconColor: "text-violet-500 bg-violet-50", check: (_p) => false },
+  { id: "materials", title: "喂素材给 AI", subtitle: "告诉 AI 你最近的动态", icon: FileText, iconColor: "text-emerald-500 bg-emerald-50", check: (_p) => false },
+  { id: "bindings", title: "绑定家人", subtitle: "生成邀请码并上传语音", icon: Users, iconColor: "text-rose-500 bg-rose-50", check: (_p) => false },
+];
+
+const PANEL_COMPONENTS: Record<string, React.ComponentType> = {
+  profile: ProfilePanel,
+  "api-keys": ApiKeysPanel,
+  persona: PersonaPanel,
+  materials: MaterialsPanel,
+  bindings: BindingsPanel,
+  notifications: NotificationsPanel,
+};
+
+export default function DashboardPage() {
+  const router = useRouter();
+  const [ready, setReady] = useState(false);
+  const [activePanel, setActivePanel] = useState<PanelId>(null);
+  const [profile, setProfile] = useState<StudentProfile | null>(null);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [loadingNotifs, setLoadingNotifs] = useState(true);
+  const [summaries, setSummaries] = useState<ChatSummary[]>([]);
+  const [loadingSummaries, setLoadingSummaries] = useState(true);
+  const [savingSummary, setSavingSummary] = useState(false);
+
+  // Materials quick-add
+  const [materials, setMaterials] = useState<Material[]>([]);
+  const [materialInput, setMaterialInput] = useState("");
+  const [materialProactive, setMaterialProactive] = useState(false);
+  const [addingMaterial, setAddingMaterial] = useState(false);
+
+  const refreshProfile = useCallback(() => {
+    api.getProfile().then(setProfile).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    if (!token) { router.replace("/login"); return; }
+    setReady(true);
+    refreshProfile();
+    api.getNotifications()
+      .then((n) => { setNotifications(n as unknown as AppNotification[]); setLoadingNotifs(false); })
+      .catch(() => setLoadingNotifs(false));
+    api.getSummaries()
+      .then((s) => { setSummaries(s); setLoadingSummaries(false); })
+      .catch(() => setLoadingSummaries(false));
+    materialApi.getMaterials()
+      .then(setMaterials)
+      .catch(() => {});
+  }, [router, refreshProfile]);
+
+  const handleLogout = () => {
+    if (window.confirm("确定要退出登录吗？")) {
+      localStorage.removeItem("token");
+      window.location.href = "/login";
+    }
+  };
+
+  const handleClosePanel = () => {
+    setActivePanel(null);
+    refreshProfile();
+    materialApi.getMaterials().then(setMaterials).catch(() => {});
+  };
+
+  const handleAddMaterial = async () => {
+    const text = materialInput.trim();
+    if (!text || addingMaterial) return;
+    setAddingMaterial(true);
+    try {
+      const m = await materialApi.addMaterial({ content: text, proactive: materialProactive });
+      setMaterials((prev) => [m, ...prev]);
+      setMaterialInput("");
+      setMaterialProactive(false);
+    } catch { /* ignore */ }
+    finally { setAddingMaterial(false); }
+  };
+
+  const handleDeleteMaterial = async (id: number) => {
+    try {
+      await materialApi.deleteMaterial(id);
+      setMaterials((prev) => prev.filter((m) => m.id !== id));
+    } catch { /* ignore */ }
+  };
+
+  if (!ready || !profile) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="w-8 h-8 border-3 border-warm-200 border-t-primary rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  const completedSteps = SETUP_STEPS.filter((s) => s.check(profile)).length;
+  const currentStepIndex = SETUP_STEPS.findIndex((s) => !s.check(profile));
+  const isSetupComplete = completedSteps >= 2;
+  const ActiveComponent = activePanel ? PANEL_COMPONENTS[activePanel] : null;
+  const unreadNotifs = notifications.filter((n) => !n.is_read).length;
+
+  return (
+    <div className="min-h-screen">
+      {/* Header */}
+      <header className="sticky top-0 z-30 backdrop-blur-md bg-white/70 border-b border-sand-200/60">
+        <div className="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-primary to-primary-dark flex items-center justify-center shadow-sm">
+              <span className="text-white text-sm font-bold">分</span>
+            </div>
+            <span className="font-semibold text-sand-800 text-sm">留学分身</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setActivePanel("notifications")}
+              className="relative p-2 text-sand-400 hover:text-sand-600 hover:bg-sand-100 rounded-lg transition-colors cursor-pointer"
+            >
+              <Bell size={18} />
+              {unreadNotifs > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-danger text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+                  {unreadNotifs}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1.5 text-sm text-sand-400 hover:text-sand-600 transition-colors cursor-pointer px-2 py-1.5 rounded-lg hover:bg-sand-100"
+            >
+              <LogOut size={15} />
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <div className="max-w-6xl mx-auto px-6 py-6">
+        {/* Welcome */}
+        <div className="mb-6 anim-slide-up">
+          <h1 className="text-xl font-bold text-sand-900">
+            {profile.name}，你好
+          </h1>
+          <p className="text-sand-400 text-sm mt-0.5">
+            {isSetupComplete ? "管理你的 AI 分身" : "让我们一步步配置你的 AI 分身"}
+          </p>
+        </div>
+
+        <div className="flex gap-6 items-start">
+          {/* ─── Left: Main content area ─── */}
+          <div className="flex-1 min-w-0 space-y-5">
+            {/* Onboarding / Setup Progress */}
+            {!isSetupComplete && (
+              <div className="bg-white rounded-2xl border border-sand-200/80 overflow-hidden anim-slide-up" style={{ animationDelay: "50ms" }}>
+                <div className="px-5 py-4 border-b border-sand-100 flex items-center justify-between">
+                  <div>
+                    <h2 className="font-semibold text-sand-800 text-sm">开始配置</h2>
+                    <p className="text-xs text-sand-400 mt-0.5">完成以下步骤，激活你的 AI 分身</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="flex gap-1">
+                      {SETUP_STEPS.map((s, i) => (
+                        <div key={s.id} className={`w-6 h-1.5 rounded-full transition-colors duration-500 ${
+                          s.check(profile) ? "bg-success" : i === currentStepIndex ? "bg-primary shimmer-bg" : "bg-sand-200"
+                        }`} />
+                      ))}
+                    </div>
+                    <span className="text-xs text-sand-400 ml-1">{completedSteps}/{SETUP_STEPS.length}</span>
+                  </div>
+                </div>
+
+                <div className="divide-y divide-sand-100">
+                  {SETUP_STEPS.map((step, i) => {
+                    const done = step.check(profile);
+                    const isCurrent = i === currentStepIndex;
+                    const isLocked = i > currentStepIndex && !done;
+                    const Icon = step.icon;
+
+                    return (
+                      <button
+                        key={step.id}
+                        onClick={() => !isLocked && setActivePanel(step.id)}
+                        disabled={isLocked}
+                        className={`w-full flex items-center gap-4 px-5 py-3.5 text-left transition-all ${
+                          done
+                            ? "opacity-60"
+                            : isCurrent
+                            ? "bg-primary-50/50 hover:bg-primary-50"
+                            : isLocked
+                            ? "opacity-40 cursor-not-allowed"
+                            : "hover:bg-sand-50 cursor-pointer"
+                        } ${!isLocked && !done ? "cursor-pointer" : ""}`}
+                      >
+                        <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 transition-all ${
+                          done ? "bg-success-light" : isCurrent ? step.iconColor : "bg-sand-100"
+                        }`}>
+                          {done ? (
+                            <CheckCircle2 size={18} className="text-success anim-checkmark" />
+                          ) : isLocked ? (
+                            <Lock size={16} className="text-sand-400" />
+                          ) : (
+                            <Icon size={18} />
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className={`text-sm font-medium ${done ? "text-sand-500 line-through" : "text-sand-800"}`}>
+                            {step.title}
+                          </p>
+                          <p className="text-xs text-sand-400 mt-0.5">{step.subtitle}</p>
+                        </div>
+                        {isCurrent && !done && (
+                          <span className="shrink-0 text-xs font-medium text-primary bg-warm-100 px-2.5 py-1 rounded-full btn-press">
+                            开始
+                          </span>
+                        )}
+                        {!done && !isLocked && !isCurrent && (
+                          <ChevronRight size={16} className="text-sand-300 shrink-0" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Quick config cards — shown after setup */}
+            {isSetupComplete && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 anim-slide-up" style={{ animationDelay: "50ms" }}>
+                {SETUP_STEPS.map((step) => {
+                  const Icon = step.icon;
+                  const done = step.check(profile);
+                  return (
+                    <button
+                      key={step.id}
+                      onClick={() => setActivePanel(step.id)}
+                      className="group bg-white rounded-xl border border-sand-200/80 p-3.5 text-left hover:border-sand-300 hover:shadow-sm transition-all cursor-pointer btn-press"
+                    >
+                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center mb-2 ${step.iconColor}`}>
+                        <Icon size={16} />
+                      </div>
+                      <p className="text-xs font-semibold text-sand-700">{step.title}</p>
+                      <p className="text-[10px] text-sand-400 mt-0.5">{done ? "已配置" : step.subtitle}</p>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* ── Quick material add ── */}
+            <div className="bg-white rounded-2xl border border-sand-200/80 overflow-hidden anim-slide-up" style={{ animationDelay: "80ms" }}>
+              <div className="px-4 pt-4 pb-3">
+                <div className="flex items-start gap-3">
+                  <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-amber-50 to-amber-100 flex items-center justify-center shrink-0 mt-0.5">
+                    <Lightbulb size={15} className="text-amber-500" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={materialInput}
+                        onChange={(e) => setMaterialInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") handleAddMaterial(); }}
+                        placeholder="告诉 AI 你最近的动态..."
+                        className="flex-1 px-3 py-2 rounded-xl border border-sand-200 text-sm bg-sand-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary/40 transition-all placeholder:text-sand-400"
+                      />
+                      <button
+                        onClick={handleAddMaterial}
+                        disabled={!materialInput.trim() || addingMaterial}
+                        className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 transition-all cursor-pointer btn-press ${
+                          materialInput.trim()
+                            ? "bg-primary text-white hover:bg-primary-dark"
+                            : "bg-sand-100 text-sand-300"
+                        }`}
+                      >
+                        <Send size={15} />
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setMaterialProactive(!materialProactive)}
+                      className={`flex items-center gap-1.5 mt-2 px-2.5 py-1 rounded-full transition-all duration-200 cursor-pointer select-none border ${
+                        materialProactive
+                          ? "bg-primary/10 border-primary/30 text-primary"
+                          : "bg-transparent border-sand-200 text-sand-400 hover:border-sand-300 hover:text-sand-500"
+                      }`}
+                    >
+                      <Megaphone size={materialProactive ? 12 : 11} className={`transition-all duration-200 ${materialProactive ? "text-primary" : "text-sand-300"}`} strokeWidth={materialProactive ? 2.2 : 1.5} />
+                      <span className={`transition-all duration-200 ${materialProactive ? "text-[11px] font-medium text-primary" : "text-[11px] font-normal text-sand-400"}`}>
+                        {materialProactive ? "AI 会主动提起" : "AI 不会主动提起"}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Recent materials */}
+              {materials.length > 0 && (
+                <div className="border-t border-sand-100">
+                  {materials.slice(0, 4).map((m) => (
+                    <div key={m.id} className="px-4 py-2.5 flex items-center gap-3 group hover:bg-sand-50/50 transition-colors">
+                      <span className="w-1 h-1 rounded-full bg-sand-300 shrink-0" />
+                      <div className="flex-1 min-w-0 flex items-center gap-2">
+                        <p className="text-xs text-sand-600 truncate">{m.content}</p>
+                        {m.proactive && (
+                          <Megaphone size={10} className="text-primary/50 shrink-0" title="AI 会主动提起" />
+                        )}
+                      </div>
+                      <span className="text-[10px] text-sand-300 shrink-0">
+                        {(() => {
+                          const diff = Date.now() - new Date(m.created_at).getTime();
+                          if (diff < 60000) return "刚刚";
+                          if (diff < 3600000) return `${Math.floor(diff / 60000)}分钟前`;
+                          if (diff < 86400000) return `${Math.floor(diff / 3600000)}小时前`;
+                          return `${Math.floor(diff / 86400000)}天前`;
+                        })()}
+                      </span>
+                      <button
+                        onClick={() => handleDeleteMaterial(m.id)}
+                        className="opacity-0 group-hover:opacity-100 text-sand-300 hover:text-danger transition-all cursor-pointer p-0.5"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))}
+                  {materials.length > 4 && (
+                    <button
+                      onClick={() => setActivePanel("materials")}
+                      className="w-full px-4 py-2 text-xs text-primary hover:text-primary-dark hover:bg-sand-50 transition-colors cursor-pointer flex items-center justify-center gap-1"
+                    >
+                      查看全部 {materials.length} 条素材 <ChevronRight size={12} />
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Notifications — main content */}
+            <div className="bg-white rounded-2xl border border-sand-200/80 overflow-hidden anim-slide-up" style={{ animationDelay: "120ms" }}>
+              <div className="px-5 py-4 border-b border-sand-100 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Bell size={16} className="text-sand-500" />
+                  <h2 className="font-semibold text-sand-800 text-sm">通知中心</h2>
+                  {unreadNotifs > 0 && (
+                    <span className="text-[10px] font-bold text-white bg-danger px-1.5 py-0.5 rounded-full">{unreadNotifs} 条未读</span>
+                  )}
+                </div>
+                <button
+                  onClick={() => setActivePanel("notifications")}
+                  className="text-xs text-primary hover:text-primary-dark transition-colors cursor-pointer"
+                >
+                  查看全部
+                </button>
+              </div>
+
+              <div className="divide-y divide-sand-100">
+                {loadingNotifs ? (
+                  <div className="px-5 py-8 flex justify-center">
+                    <div className="w-5 h-5 border-2 border-sand-200 border-t-sand-400 rounded-full animate-spin" />
+                  </div>
+                ) : notifications.length === 0 ? (
+                  <div className="px-5 py-10 text-center">
+                    <div className="w-12 h-12 rounded-2xl bg-sand-100 flex items-center justify-center mx-auto mb-3">
+                      <Bell size={20} className="text-sand-400" />
+                    </div>
+                    <p className="text-sm text-sand-500 font-medium">暂无通知</p>
+                    <p className="text-xs text-sand-400 mt-1">当 AI 遇到敏感话题时会在这里通知你</p>
+                  </div>
+                ) : (
+                  notifications.slice(0, 5).map((n) => (
+                    <div key={n.id} className={`px-5 py-3.5 flex items-start gap-3 ${!n.is_read ? "bg-warm-50/50" : ""}`}>
+                      <div className="mt-0.5 shrink-0">
+                        {n.urgency === "urgent" ? (
+                          <AlertTriangle size={16} className="text-warm-500" />
+                        ) : (
+                          <Bell size={16} className="text-sand-400" />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${
+                            n.type === "sensitive_topic" ? "bg-warm-100 text-warm-600" : "bg-sand-100 text-sand-500"
+                          }`}>
+                            {n.type === "sensitive_topic" ? "敏感话题" : n.type}
+                          </span>
+                          <span className="text-[10px] text-sand-400">
+                            {new Date(n.created_at).toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                          </span>
+                          {!n.is_read && <span className="w-1.5 h-1.5 rounded-full bg-primary" />}
+                        </div>
+                        <p className="text-sm text-sand-700 line-clamp-2">{n.content}</p>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Conversation summaries */}
+            <div className="bg-white rounded-2xl border border-sand-200/80 overflow-hidden anim-slide-up" style={{ animationDelay: "180ms" }}>
+              <div className="px-5 py-4 border-b border-sand-100 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Sparkles size={16} className="text-primary" />
+                  <h2 className="font-semibold text-sand-800 text-sm">对话总结</h2>
+                </div>
+                {/* Summary settings inline */}
+                <div className="flex items-center gap-2">
+                  <select
+                    value={profile.summary_interval}
+                    onChange={async (e) => {
+                      setSavingSummary(true);
+                      try {
+                        await api.updateSummarySettings({ summary_interval: Number(e.target.value) });
+                        refreshProfile();
+                      } finally { setSavingSummary(false); }
+                    }}
+                    disabled={!profile.summary_enabled || savingSummary}
+                    className="text-[11px] text-sand-500 bg-sand-50 border border-sand-200 rounded-lg px-2 py-1 focus:outline-none cursor-pointer disabled:opacity-50"
+                  >
+                    <option value={10}>每 10 条</option>
+                    <option value={20}>每 20 条</option>
+                    <option value={50}>每 50 条</option>
+                  </select>
+                  <button
+                    onClick={async () => {
+                      setSavingSummary(true);
+                      try {
+                        await api.updateSummarySettings({ summary_enabled: !profile.summary_enabled });
+                        refreshProfile();
+                      } finally { setSavingSummary(false); }
+                    }}
+                    className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${
+                      profile.summary_enabled ? "bg-success" : "bg-sand-300"
+                    }`}
+                  >
+                    <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${
+                      profile.summary_enabled ? "left-[18px]" : "left-0.5"
+                    }`} />
+                  </button>
+                </div>
+              </div>
+
+              {!profile.summary_enabled ? (
+                <div className="px-5 py-8 text-center">
+                  <Settings2 size={20} className="text-sand-300 mx-auto mb-2" />
+                  <p className="text-sm text-sand-400">对话总结已关闭</p>
+                  <p className="text-xs text-sand-300 mt-0.5">点击右上角开关启用</p>
+                </div>
+              ) : loadingSummaries ? (
+                <div className="px-5 py-8 flex justify-center">
+                  <div className="w-5 h-5 border-2 border-sand-200 border-t-sand-400 rounded-full animate-spin" />
+                </div>
+              ) : summaries.length === 0 ? (
+                <div className="px-5 py-10 text-center">
+                  <div className="w-12 h-12 rounded-2xl bg-primary-50 flex items-center justify-center mx-auto mb-3">
+                    <Sparkles size={20} className="text-primary" />
+                  </div>
+                  <p className="text-sm text-sand-500 font-medium">还没有对话总结</p>
+                  <p className="text-xs text-sand-400 mt-1 max-w-xs mx-auto">
+                    家人聊满 {profile.summary_interval} 条消息后自动生成
+                  </p>
+                </div>
+              ) : (
+                <div className="divide-y divide-sand-100">
+                  {summaries.slice(0, 5).map((s) => {
+                    const MOOD_MAP: Record<string, { label: string; color: string }> = {
+                      happy: { label: "😊 开心", color: "bg-green-50 text-green-600" },
+                      neutral: { label: "😐 平静", color: "bg-sand-100 text-sand-500" },
+                      worried: { label: "😟 担忧", color: "bg-amber-50 text-amber-600" },
+                      sad: { label: "😢 伤感", color: "bg-sky-50 text-sky-600" },
+                      angry: { label: "😤 生气", color: "bg-red-50 text-red-600" },
+                    };
+                    const mood = s.mood ? MOOD_MAP[s.mood] : null;
+
+                    return (
+                      <div key={s.id} className="px-5 py-3.5">
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <span className="text-[10px] text-sand-400">
+                            {new Date(s.created_at).toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                          </span>
+                          <span className="text-[10px] text-sand-300">·</span>
+                          <span className="text-[10px] text-sand-400">{s.message_count} 条消息</span>
+                          {mood && (
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${mood.color}`}>
+                              {mood.label}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-sm text-sand-700 leading-relaxed">{s.summary}</p>
+                        {s.topics && (
+                          <div className="flex gap-1.5 mt-2 flex-wrap">
+                            {s.topics.split(",").map((t, j) => (
+                              <span key={j} className="text-[10px] bg-primary-50 text-primary-dark px-2 py-0.5 rounded-full">
+                                {t.trim()}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* ─── Right: Status sidebar (desktop only) ─── */}
+          <div className="hidden lg:block w-64 shrink-0 space-y-4 anim-slide-right" style={{ animationDelay: "100ms" }}>
+            {/* Profile card */}
+            <div className="bg-white rounded-2xl border border-sand-200/80 p-4">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary-light to-primary flex items-center justify-center">
+                  <span className="text-white font-bold text-sm">{profile.name.charAt(0)}</span>
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-sand-800">{profile.name}</p>
+                  <p className="text-[10px] text-sand-400">{profile.email}</p>
+                </div>
+              </div>
+              {(profile.school || profile.city) && (
+                <div className="text-xs text-sand-500 space-y-0.5 pt-2 border-t border-sand-100">
+                  {profile.school && <p>{profile.school}</p>}
+                  {profile.city && profile.country && <p>{profile.city}, {profile.country}</p>}
+                </div>
+              )}
+            </div>
+
+            {/* Status checklist */}
+            <div className="bg-white rounded-2xl border border-sand-200/80 p-4">
+              <h3 className="text-xs font-semibold text-sand-600 mb-3">配置状态</h3>
+              <div className="space-y-2.5">
+                <StatusItem done={!!profile.has_llm_key} label="AI 模型" detail={profile.llm_provider || "未配置"} />
+                <StatusItem done={!!(profile.school && profile.city)} label="基本信息" detail={profile.school || "未填写"} />
+                <StatusItem done={!!profile.has_fish_key} label="语音克隆" detail={profile.has_fish_key ? "已配置" : "未配置"} />
+              </div>
+            </div>
+
+            {/* Quick actions */}
+            <div className="bg-white rounded-2xl border border-sand-200/80 p-4">
+              <h3 className="text-xs font-semibold text-sand-600 mb-3">快捷操作</h3>
+              <div className="space-y-1.5">
+                <QuickAction label="添加素材" onClick={() => setActivePanel("materials")} />
+                <QuickAction label="管理邀请码" onClick={() => setActivePanel("bindings")} />
+                <QuickAction label="调整人格" onClick={() => setActivePanel("persona")} />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ─── Slide-over panel ─── */}
+      {activePanel && ActiveComponent && (
+        <>
+          <div className="fixed inset-0 z-40 bg-sand-900/10 backdrop-blur-[2px] anim-fade-in" onClick={handleClosePanel} />
+          <div className="fixed right-0 top-0 bottom-0 z-50 w-full max-w-lg bg-white border-l border-sand-200 shadow-2xl shadow-sand-900/10 overflow-y-auto anim-slide-right">
+            <div className="sticky top-0 z-10 bg-white/90 backdrop-blur-md border-b border-sand-100 px-6 py-4 flex items-center justify-between">
+              <h2 className="font-semibold text-sand-800 text-sm">
+                {SETUP_STEPS.find((s) => s.id === activePanel)?.title ||
+                  (activePanel === "notifications" ? "通知中心" : "")}
+              </h2>
+              <button onClick={handleClosePanel} className="text-sand-400 hover:text-sand-600 cursor-pointer p-1.5 rounded-lg hover:bg-sand-100 transition-colors btn-press">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="p-6">
+              <ActiveComponent />
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function StatusItem({ done, label, detail }: { done: boolean; label: string; detail: string }) {
+  return (
+    <div className="flex items-center gap-2.5">
+      <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 ${done ? "bg-success-light" : "bg-sand-100"}`}>
+        {done ? <CheckCircle2 size={12} className="text-success" /> : <div className="w-1.5 h-1.5 rounded-full bg-sand-300" />}
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-xs text-sand-700">{label}</p>
+        <p className={`text-[10px] truncate ${done ? "text-success" : "text-sand-400"}`}>{detail}</p>
+      </div>
+    </div>
+  );
+}
+
+function QuickAction({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs text-sand-600 hover:bg-sand-50 hover:text-sand-800 transition-colors cursor-pointer btn-press"
+    >
+      {label}
+      <ChevronRight size={14} className="text-sand-300" />
+    </button>
+  );
+}

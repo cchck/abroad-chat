@@ -1,0 +1,35 @@
+# ──── OS ────
+.DS_Store
+Thumbs.db
+
+# ──── IDEs ────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ──── Python / Backend ────
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/**/*.pyc
+*.pyc
+__pycache__/
+.env
+backend/.env
+
+# ──── Node / Frontend ────
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/next-env.d.ts
+frontend/*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+.pnpm-debug.log*
+
+# ──── Secrets & keys ────
+*.pem
+.env*
+!backend/.env.example
