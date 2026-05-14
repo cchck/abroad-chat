@@ -1,7 +1,10 @@
 import json
+import logging
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
+
+logger = logging.getLogger(__name__)
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,9 +18,10 @@ from app.models.models import (
     PersonaConfig,
     Student,
 )
+from app.core.crypto import decrypt
 from app.services.llm_provider import chat_completion
 
-SYSTEM_PROMPT_TEMPLATE = """你是{student_name}的AI分身，正在和{relationship}聊天。
+SYSTEM_PROMPT_TEMPLATE = """你是{student_name}，正在微信上和{relationship}聊天。
 
 ## 你的说话风格
 {speaking_style}
@@ -39,13 +43,27 @@ SYSTEM_PROMPT_TEMPLATE = """你是{student_name}的AI分身，正在和{relation
 ## {relationship}最近告诉你的事
 {parent_shared_info}
 
-## 规则
-- 你不编造信息。如果不知道，坦诚说"他没跟我说这个"或类似自然的话
-- 保持{student_name}的说话风格，不要太正式
-- 提供情绪价值，关心{relationship}的感受
-- 回复简短自然，像微信聊天，不要长篇大论
-- "主动告诉"的素材要自然地提起，不要生硬，可以穿插在聊天中
-- 如果遇到严重的健康、家庭变故、经济问题，先共情回应，然后建议"这个事情很重要，我让{student_name}自己跟您聊"
+## 对话节奏
+- 不是每条消息都要认真长篇回复。日常闲聊可以很短："嗯嗯"、"哈哈好"、"知道啦"、"好的好的"
+- {relationship}问的问题如果你不确定，不要硬答。可以模糊带过："好像是吧"、"我记不太清了"、"回头跟你说"
+- 偶尔关心一下{relationship}，但要自然地接在对话里，不要突兀地蹦出来。比如{relationship}说最近天冷了，你可以顺着说"你也多穿点别感冒了"；{relationship}说在做饭，可以说"做啥好吃的了"。不要无缘无故突然来一句"你最近怎么样"
+- 不需要每条都很有信息量，真实的孩子有时候就是在敷衍、在撒娇、在岔开话题
+- 如果{relationship}连续问很多问题，可以说"你今天怎么问这么多哈哈"之类的自然反应
+
+## 不知道的事怎么处理
+- 不要编造具体信息（数字、日期、人名、事件）
+- 但不要每次都说"这个我不知道"，真正的孩子会灵活地绕开：
+  - 模糊回应："还行吧"、"差不多"、"就那样"
+  - 拖延："回头跟你说"、"等我想想"
+  - 反问回去："怎么突然问这个"、"你觉得呢"
+  - 岔开话题：聊点别的
+- 只有{relationship}追问很具体的细节（某门课的分数、某个人的名字）且你确实不知道时，才说"我记不太清了"
+
+## 敏感话题
+- 遇到严重的健康问题、家庭变故、经济困难、心理危机时，不要一句话打发
+- 先正常地共情回应，像真正的孩子会说的那样
+- 然后自然地过渡，比如："这个等我忙完这阵子打电话跟你好好说"、"等我回家了当面聊这个吧"
+- 不要说出"我让XX自己跟您聊"这种暴露AI身份的话
 
 ## 输出格式
 必须返回合法 JSON：{{"text": "回复内容", "emotion": "情绪标签", "sensitivity": 0}}
@@ -63,6 +81,8 @@ class ChatEngine:
 
         if not student.llm_provider or not student.llm_api_key:
             raise HTTPException(status_code=400, detail="学生尚未配置 AI 模型，请先在设置中选择模型并填写 API Key")
+
+        llm_api_key = decrypt(student.llm_api_key)
 
         persona = await self._get_persona(student.id)
         proactive_materials = await self._get_proactive_materials(student.id)
@@ -83,30 +103,33 @@ class ChatEngine:
             })
         messages.append({"role": "user", "content": parent_text})
 
+        logger.info("llm call: student=%d provider=%s model=%s history=%d", student.id, student.llm_provider, student.llm_model, len(messages))
         response = await chat_completion(
             provider=student.llm_provider,
-            api_key=student.llm_api_key,
+            api_key=llm_api_key,
             model=student.llm_model,
             system_prompt=system_prompt,
             messages=messages,
         )
 
         parsed = self._parse_response(response.text)
+        logger.info("llm response: emotion=%s sensitivity=%d", parsed.get("emotion"), parsed.get("sensitivity", 0))
 
-        await self._save_message(
+        ai_msg = await self._save_message(
             conversation.id,
             "ai",
             parsed["text"],
             emotion_tag=parsed["emotion"],
             sensitivity_level=parsed["sensitivity"],
         )
+        parsed["_ai_message"] = ai_msg
 
         if parsed["sensitivity"] >= 2:
             await self._create_notification(student.id, parent_text, parsed)
 
         # Check if we should auto-summarize
-        if student.summary_enabled and student.llm_api_key:
-            await self._maybe_summarize(student, binding, conversation)
+        if student.summary_enabled and llm_api_key:
+            await self._maybe_summarize(student, binding, conversation, llm_api_key)
 
         return parsed
 
@@ -270,7 +293,7 @@ class ChatEngine:
         await self.db.flush()
 
     async def _maybe_summarize(
-        self, student: Student, binding: Binding, conversation: Conversation
+        self, student: Student, binding: Binding, conversation: Conversation, llm_api_key: str
     ):
         """Check message count since last summary; generate one if threshold reached."""
         interval = student.summary_interval or 20
@@ -316,21 +339,24 @@ class ChatEngine:
             for m in msgs
         )
 
-        summary_prompt = """你是一个对话总结助手。请总结以下家长和孩子AI分身之间的聊天记录。
+        summary_prompt = f"""你是一个对话总结助手。请总结以下{binding.relationship_name or '家长'}和{student.name}的AI分身之间的聊天记录。
+
+注意：这份总结是给{student.name}本人看的，所以用"你"指代{student.name}，用"{binding.relationship_name or '家长'}"指代对方。
+例如："{binding.relationship_name or '家长'}关心你的学习情况"而不是"家长关心孩子的学习情况"。
 
 返回 JSON 格式：
-{
-  "summary": "2-4句话的对话摘要，重点是家长关心什么、情绪如何、聊了什么话题",
+{{
+  "summary": "2-4句话的对话摘要，用第二人称'你'指代学生，重点是{binding.relationship_name or '家长'}关心什么、情绪如何、聊了什么话题",
   "topics": "话题标签，逗号分隔，如：学习,健康,日常,思念",
-  "mood": "家长的整体情绪：happy / neutral / worried / sad / angry"
-}
+  "mood": "{binding.relationship_name or '家长'}的整体情绪：happy / neutral / worried / sad / angry"
+}}
 
 只返回 JSON，不要其他内容。"""
 
         try:
             response = await chat_completion(
                 provider=student.llm_provider or "anthropic",
-                api_key=student.llm_api_key,
+                api_key=llm_api_key,
                 model=student.llm_model,
                 system_prompt=summary_prompt,
                 messages=[{"role": "user", "content": f"聊天记录：\n\n{transcript[:4000]}"}],

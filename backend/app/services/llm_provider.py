@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import anthropic
 import httpx
+from fastapi import HTTPException
 
 PROVIDERS = {
     "anthropic": {
@@ -59,12 +60,19 @@ async def _call_anthropic(
     max_tokens: int,
 ) -> LLMResponse:
     client = anthropic.AsyncAnthropic(api_key=api_key)
-    response = await client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        system=system_prompt,
-        messages=messages,
-    )
+    try:
+        response = await client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=messages,
+        )
+    except anthropic.AuthenticationError:
+        raise HTTPException(status_code=400, detail="API Key 无效，请检查设置中的密钥")
+    except anthropic.RateLimitError:
+        raise HTTPException(status_code=429, detail="AI 调用太频繁，请稍后再试")
+    except (anthropic.APIError, anthropic.APIConnectionError):
+        raise HTTPException(status_code=502, detail="AI 服务暂时不可用，请稍后再试")
     return LLMResponse(text=response.content[0].text)
 
 
@@ -80,19 +88,30 @@ async def _call_openai_compatible(
 
     full_messages = [{"role": "system", "content": system_prompt}] + messages
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.post(
-            f"{base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": full_messages,
-                "max_tokens": max_tokens,
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-        return LLMResponse(text=data["choices"][0]["message"]["content"])
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": full_messages,
+                    "max_tokens": max_tokens,
+                },
+            )
+            if response.status_code == 401:
+                raise HTTPException(status_code=400, detail="API Key 无效，请检查设置中的密钥")
+            if response.status_code == 429:
+                raise HTTPException(status_code=429, detail="AI 调用太频繁，请稍后再试")
+            response.raise_for_status()
+            data = response.json()
+            return LLMResponse(text=data["choices"][0]["message"]["content"])
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="AI 响应超时，请稍后再试")
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="AI 服务暂时不可用，请稍后再试")

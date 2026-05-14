@@ -19,15 +19,21 @@ export default function ParentPage() {
   const [bindError, setBindError] = useState("");
   const [binding, setBinding] = useState(false);
 
+  const [needsLogin, setNeedsLogin] = useState(false);
+
   useEffect(() => {
-    setNickname(getStoredNickname() || "");
+    const stored = getStoredNickname();
+    setNickname(stored || "");
     parentApi
       .getChildren()
       .then((c) => {
         setChildren(c);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        setNeedsLogin(true);
+        setLoading(false);
+      });
   }, []);
 
   const handleBind = async (e: React.FormEvent) => {
@@ -36,6 +42,10 @@ export default function ParentPage() {
     setBindError("");
     setBinding(true);
     try {
+      if (needsLogin) {
+        await parentApi.devLogin(nickname.trim());
+        setNeedsLogin(false);
+      }
       const child = await parentApi.bind(inviteCode.trim(), nickname.trim());
       setChildren((prev) => [...prev, child]);
       setShowBind(false);
@@ -110,7 +120,7 @@ export default function ParentPage() {
         )}
 
         {/* Empty state */}
-        {children.length === 0 && !showBind && (
+        {children.length === 0 && !showBind && !needsLogin && (
           <div className="bg-white rounded-2xl border border-sand-200/80 p-8 text-center anim-slide-up" style={{ animationDelay: "60ms" }}>
             <div className="w-16 h-16 rounded-3xl bg-gradient-to-br from-warm-100 to-warm-200 flex items-center justify-center mx-auto mb-4">
               <Heart size={28} className="text-primary" />
@@ -144,7 +154,7 @@ export default function ParentPage() {
         )}
 
         {/* Bind form */}
-        {showBind && (
+        {(showBind || needsLogin) && (
           <div className="bg-white rounded-2xl border border-sand-200/80 overflow-hidden anim-scale-in">
             <div className="px-5 py-4 border-b border-sand-100">
               <h2 className="text-sm font-semibold text-sand-800">输入邀请码</h2>

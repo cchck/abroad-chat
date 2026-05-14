@@ -5,15 +5,14 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { parentApi, type ChatMessage, type ChatReply } from "@/lib/parent-api";
 import { ArrowLeft, Send, Loader2, Heart, Volume2, Square, ChevronDown } from "lucide-react";
 
-// ── Get audio duration from base64 ──
-function getAudioDuration(base64: string): Promise<number> {
+// ── Get audio duration from any src ──
+function getAudioDuration(src: string): Promise<number> {
   return new Promise((resolve) => {
-    const audio = new Audio(`data:audio/mp3;base64,${base64}`);
+    const audio = new Audio(src);
     audio.addEventListener("loadedmetadata", () => {
       resolve(Math.round(audio.duration));
     });
     audio.addEventListener("error", () => resolve(0));
-    // Some browsers need this to trigger metadata load
     audio.preload = "metadata";
   });
 }
@@ -68,21 +67,30 @@ function ChatContent() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // ── Load duration for a voice message ──
-  const loadDuration = useCallback(async (idx: number, base64: string) => {
-    const dur = await getAudioDuration(base64);
+  const loadDuration = useCallback(async (idx: number, src: string) => {
+    const dur = await getAudioDuration(src);
     setDurations((prev) => ({ ...prev, [idx]: dur }));
   }, []);
 
   // Load durations whenever messages change
   useEffect(() => {
     messages.forEach((msg, i) => {
-      if (msg.voice_base64 && durations[i] === undefined) {
-        loadDuration(i, msg.voice_base64);
+      if (durations[i] !== undefined) return;
+      if (msg.voice_base64) {
+        loadDuration(i, `data:audio/mp3;base64,${msg.voice_base64}`);
+      } else if (msg.content_voice_url) {
+        loadDuration(i, `http://localhost:8000${msg.content_voice_url}`);
       }
     });
   }, [messages, durations, loadDuration]);
 
-  const playVoice = (base64: string, idx: number) => {
+  const getVoiceSrc = (msg: ChatMessage): string | null => {
+    if (msg.voice_base64) return `data:audio/mp3;base64,${msg.voice_base64}`;
+    if (msg.content_voice_url) return `http://localhost:8000${msg.content_voice_url}`;
+    return null;
+  };
+
+  const playVoice = (msg: ChatMessage, idx: number) => {
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current = null;
@@ -91,7 +99,9 @@ function ChatContent() {
       setPlayingIdx(null);
       return;
     }
-    const audio = new Audio(`data:audio/mp3;base64,${base64}`);
+    const src = getVoiceSrc(msg);
+    if (!src) return;
+    const audio = new Audio(src);
     audio.onended = () => { setPlayingIdx(null); audioRef.current = null; };
     audio.onerror = () => { setPlayingIdx(null); audioRef.current = null; };
     audio.play();
@@ -184,7 +194,7 @@ function ChatContent() {
   // ── Render a single message ──
   const renderMessage = (msg: ChatMessage, i: number) => {
     const isParent = msg.role === "parent";
-    const hasVoice = !isParent && !!msg.voice_base64;
+    const hasVoice = !isParent && !!(msg.voice_base64 || msg.content_voice_url);
     const isPlaying = playingIdx === i;
     const showText = !hasVoice || expandedTexts.has(i);
     const duration = durations[i] || 0;
@@ -207,7 +217,7 @@ function ChatContent() {
           {/* ── Voice bar (WeChat style) ── */}
           {hasVoice && (
             <button
-              onClick={() => playVoice(msg.voice_base64!, i)}
+              onClick={() => playVoice(msg, i)}
               style={{ width: getVoiceBubbleWidth(duration) }}
               className={`flex items-center gap-2 rounded-2xl rounded-bl-md px-4 py-3 shadow-sm cursor-pointer btn-press transition-all ${
                 isPlaying

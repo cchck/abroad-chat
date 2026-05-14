@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import ProfilePanel from "@/components/panels/profile-panel";
 import ApiKeysPanel from "@/components/panels/api-keys-panel";
@@ -8,14 +8,21 @@ import PersonaPanel from "@/components/panels/persona-panel";
 import MaterialsPanel from "@/components/panels/materials-panel";
 import BindingsPanel from "@/components/panels/bindings-panel";
 import NotificationsPanel from "@/components/panels/notifications-panel";
-import { api, type StudentProfile, type AppNotification, type ChatSummary } from "@/lib/api";
+import {
+  api,
+  type StudentProfile,
+  type AppNotification,
+  type ChatSummary,
+  type Material,
+  type Binding,
+  type ChatHistoryMessage,
+} from "@/lib/api";
 import {
   User, Key, MessageSquare, FileText, Users, Bell,
   X, LogOut, CheckCircle2, Lock, ChevronRight,
   AlertTriangle, Sparkles, Settings2, Send, Lightbulb,
-  Trash2, Megaphone,
+  Trash2, Megaphone, MessageCircle, Loader2, ArrowLeft,
 } from "lucide-react";
-import { api as materialApi, type Material } from "@/lib/api";
 
 type PanelId = "profile" | "api-keys" | "persona" | "materials" | "bindings" | "notifications" | null;
 
@@ -45,6 +52,14 @@ const PANEL_COMPONENTS: Record<string, React.ComponentType> = {
   notifications: NotificationsPanel,
 };
 
+const MOOD_MAP: Record<string, { label: string; color: string }> = {
+  happy: { label: "开心", color: "bg-green-50 text-green-600" },
+  neutral: { label: "平静", color: "bg-sand-100 text-sand-500" },
+  worried: { label: "担忧", color: "bg-amber-50 text-amber-600" },
+  sad: { label: "伤感", color: "bg-sky-50 text-sky-600" },
+  angry: { label: "生气", color: "bg-red-50 text-red-600" },
+};
+
 export default function DashboardPage() {
   const router = useRouter();
   const [ready, setReady] = useState(false);
@@ -55,6 +70,14 @@ export default function DashboardPage() {
   const [summaries, setSummaries] = useState<ChatSummary[]>([]);
   const [loadingSummaries, setLoadingSummaries] = useState(true);
   const [savingSummary, setSavingSummary] = useState(false);
+  const [bindings, setBindings] = useState<Binding[]>([]);
+  const [loadingBindings, setLoadingBindings] = useState(true);
+
+  // Chat history overlay
+  const [chatOverlay, setChatOverlay] = useState<{ bindingId: number; name: string } | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatHistoryMessage[]>([]);
+  const [loadingChat, setLoadingChat] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Materials quick-add
   const [materials, setMaterials] = useState<Material[]>([]);
@@ -72,14 +95,17 @@ export default function DashboardPage() {
     setReady(true);
     refreshProfile();
     api.getNotifications()
-      .then((n) => { setNotifications(n as unknown as AppNotification[]); setLoadingNotifs(false); })
+      .then((n) => { setNotifications(n); setLoadingNotifs(false); })
       .catch(() => setLoadingNotifs(false));
     api.getSummaries()
       .then((s) => { setSummaries(s); setLoadingSummaries(false); })
       .catch(() => setLoadingSummaries(false));
-    materialApi.getMaterials()
+    api.getMaterials()
       .then(setMaterials)
       .catch(() => {});
+    api.getBindings()
+      .then((b) => { setBindings(b); setLoadingBindings(false); })
+      .catch(() => setLoadingBindings(false));
   }, [router, refreshProfile]);
 
   const handleLogout = () => {
@@ -92,7 +118,8 @@ export default function DashboardPage() {
   const handleClosePanel = () => {
     setActivePanel(null);
     refreshProfile();
-    materialApi.getMaterials().then(setMaterials).catch(() => {});
+    api.getMaterials().then(setMaterials).catch(() => {});
+    api.getBindings().then(setBindings).catch(() => {});
   };
 
   const handleAddMaterial = async () => {
@@ -100,7 +127,7 @@ export default function DashboardPage() {
     if (!text || addingMaterial) return;
     setAddingMaterial(true);
     try {
-      const m = await materialApi.addMaterial({ content: text, proactive: materialProactive });
+      const m = await api.addMaterial({ content: text, proactive: materialProactive });
       setMaterials((prev) => [m, ...prev]);
       setMaterialInput("");
       setMaterialProactive(false);
@@ -110,9 +137,29 @@ export default function DashboardPage() {
 
   const handleDeleteMaterial = async (id: number) => {
     try {
-      await materialApi.deleteMaterial(id);
+      await api.deleteMaterial(id);
       setMaterials((prev) => prev.filter((m) => m.id !== id));
     } catch { /* ignore */ }
+  };
+
+  const handleOpenChat = async (bindingId: number, name: string) => {
+    setChatOverlay({ bindingId, name });
+    setLoadingChat(true);
+    setChatMessages([]);
+    try {
+      const msgs = await api.getChatHistory(bindingId);
+      setChatMessages(msgs);
+      setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "instant" }), 50);
+    } catch {
+      setChatMessages([]);
+    } finally {
+      setLoadingChat(false);
+    }
+  };
+
+  const handleCloseChat = () => {
+    setChatOverlay(null);
+    setChatMessages([]);
   };
 
   if (!ready || !profile) {
@@ -128,6 +175,7 @@ export default function DashboardPage() {
   const isSetupComplete = completedSteps >= 2;
   const ActiveComponent = activePanel ? PANEL_COMPONENTS[activePanel] : null;
   const unreadNotifs = notifications.filter((n) => !n.is_read).length;
+  const activeBindings = bindings.filter((b) => b.status === "active");
 
   return (
     <div className="min-h-screen">
@@ -174,7 +222,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="flex gap-6 items-start">
-          {/* ─── Left: Main content area ─── */}
+          {/* Left: Main content area */}
           <div className="flex-1 min-w-0 space-y-5">
             {/* Onboarding / Setup Progress */}
             {!isSetupComplete && (
@@ -273,7 +321,7 @@ export default function DashboardPage() {
               </div>
             )}
 
-            {/* ── Quick material add ── */}
+            {/* Quick material add */}
             <div className="bg-white rounded-2xl border border-sand-200/80 overflow-hidden anim-slide-up" style={{ animationDelay: "80ms" }}>
               <div className="px-4 pt-4 pb-3">
                 <div className="flex items-start gap-3">
@@ -320,7 +368,6 @@ export default function DashboardPage() {
                 </div>
               </div>
 
-              {/* Recent materials */}
               {materials.length > 0 && (
                 <div className="border-t border-sand-100">
                   {materials.slice(0, 4).map((m) => (
@@ -329,7 +376,7 @@ export default function DashboardPage() {
                       <div className="flex-1 min-w-0 flex items-center gap-2">
                         <p className="text-xs text-sand-600 truncate">{m.content}</p>
                         {m.proactive && (
-                          <Megaphone size={10} className="text-primary/50 shrink-0" title="AI 会主动提起" />
+                          <span className="shrink-0" aria-label="AI 会主动提起"><Megaphone size={10} className="text-primary/50" /></span>
                         )}
                       </div>
                       <span className="text-[10px] text-sand-300 shrink-0">
@@ -361,7 +408,7 @@ export default function DashboardPage() {
               )}
             </div>
 
-            {/* Notifications — main content */}
+            {/* Notifications */}
             <div className="bg-white rounded-2xl border border-sand-200/80 overflow-hidden anim-slide-up" style={{ animationDelay: "120ms" }}>
               <div className="px-5 py-4 border-b border-sand-100 flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -422,104 +469,160 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {/* Conversation summaries */}
+            {/* ── Family Cards: chat history + summaries ── */}
             <div className="bg-white rounded-2xl border border-sand-200/80 overflow-hidden anim-slide-up" style={{ animationDelay: "180ms" }}>
-              <div className="px-5 py-4 border-b border-sand-100 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Sparkles size={16} className="text-primary" />
-                  <h2 className="font-semibold text-sand-800 text-sm">对话总结</h2>
+              <div className="px-5 py-4 border-b border-sand-100">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Users size={16} className="text-primary" />
+                    <h2 className="font-semibold text-sand-800 text-sm">家人动态</h2>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={profile.summary_interval}
+                      onChange={async (e) => {
+                        setSavingSummary(true);
+                        try {
+                          await api.updateSummarySettings({ summary_interval: Number(e.target.value) });
+                          refreshProfile();
+                        } finally { setSavingSummary(false); }
+                      }}
+                      disabled={!profile.summary_enabled || savingSummary}
+                      className="text-[11px] text-sand-500 bg-sand-50 border border-sand-200 rounded-lg px-2 py-1 focus:outline-none cursor-pointer disabled:opacity-50"
+                    >
+                      <option value={10}>每 10 条总结</option>
+                      <option value={20}>每 20 条总结</option>
+                      <option value={50}>每 50 条总结</option>
+                    </select>
+                    <button
+                      onClick={async () => {
+                        setSavingSummary(true);
+                        try {
+                          await api.updateSummarySettings({ summary_enabled: !profile.summary_enabled });
+                          refreshProfile();
+                        } finally { setSavingSummary(false); }
+                      }}
+                      className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${
+                        profile.summary_enabled ? "bg-success" : "bg-sand-300"
+                      }`}
+                    >
+                      <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${
+                        profile.summary_enabled ? "left-[18px]" : "left-0.5"
+                      }`} />
+                    </button>
+                  </div>
                 </div>
-                {/* Summary settings inline */}
-                <div className="flex items-center gap-2">
-                  <select
-                    value={profile.summary_interval}
-                    onChange={async (e) => {
-                      setSavingSummary(true);
-                      try {
-                        await api.updateSummarySettings({ summary_interval: Number(e.target.value) });
-                        refreshProfile();
-                      } finally { setSavingSummary(false); }
-                    }}
-                    disabled={!profile.summary_enabled || savingSummary}
-                    className="text-[11px] text-sand-500 bg-sand-50 border border-sand-200 rounded-lg px-2 py-1 focus:outline-none cursor-pointer disabled:opacity-50"
-                  >
-                    <option value={10}>每 10 条</option>
-                    <option value={20}>每 20 条</option>
-                    <option value={50}>每 50 条</option>
-                  </select>
-                  <button
-                    onClick={async () => {
-                      setSavingSummary(true);
-                      try {
-                        await api.updateSummarySettings({ summary_enabled: !profile.summary_enabled });
-                        refreshProfile();
-                      } finally { setSavingSummary(false); }
-                    }}
-                    className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${
-                      profile.summary_enabled ? "bg-success" : "bg-sand-300"
-                    }`}
-                  >
-                    <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${
-                      profile.summary_enabled ? "left-[18px]" : "left-0.5"
-                    }`} />
-                  </button>
-                </div>
+                <p className="text-[11px] text-sand-400 mt-1.5">
+                  {profile.summary_enabled
+                    ? `开启中 — AI 每和家人聊 ${profile.summary_interval} 条消息，自动生成一段对话摘要给你`
+                    : "已关闭 — 开启后，AI 会定期总结和家人的聊天内容，方便你快速了解"}
+                </p>
               </div>
 
-              {!profile.summary_enabled ? (
-                <div className="px-5 py-8 text-center">
-                  <Settings2 size={20} className="text-sand-300 mx-auto mb-2" />
-                  <p className="text-sm text-sand-400">对话总结已关闭</p>
-                  <p className="text-xs text-sand-300 mt-0.5">点击右上角开关启用</p>
-                </div>
-              ) : loadingSummaries ? (
+              {loadingBindings || loadingSummaries ? (
                 <div className="px-5 py-8 flex justify-center">
                   <div className="w-5 h-5 border-2 border-sand-200 border-t-sand-400 rounded-full animate-spin" />
                 </div>
-              ) : summaries.length === 0 ? (
+              ) : activeBindings.length === 0 ? (
                 <div className="px-5 py-10 text-center">
-                  <div className="w-12 h-12 rounded-2xl bg-primary-50 flex items-center justify-center mx-auto mb-3">
-                    <Sparkles size={20} className="text-primary" />
+                  <div className="w-12 h-12 rounded-2xl bg-sand-100 flex items-center justify-center mx-auto mb-3">
+                    <Users size={20} className="text-sand-400" />
                   </div>
-                  <p className="text-sm text-sand-500 font-medium">还没有对话总结</p>
-                  <p className="text-xs text-sand-400 mt-1 max-w-xs mx-auto">
-                    家人聊满 {profile.summary_interval} 条消息后自动生成
-                  </p>
+                  <p className="text-sm text-sand-500 font-medium">还没有绑定家人</p>
+                  <p className="text-xs text-sand-400 mt-1">绑定家人后，这里会显示聊天动态和对话总结</p>
+                  <button
+                    onClick={() => setActivePanel("bindings")}
+                    className="mt-3 text-xs text-primary hover:text-primary-dark font-medium cursor-pointer"
+                  >
+                    去绑定
+                  </button>
                 </div>
               ) : (
                 <div className="divide-y divide-sand-100">
-                  {summaries.slice(0, 5).map((s) => {
-                    const MOOD_MAP: Record<string, { label: string; color: string }> = {
-                      happy: { label: "😊 开心", color: "bg-green-50 text-green-600" },
-                      neutral: { label: "😐 平静", color: "bg-sand-100 text-sand-500" },
-                      worried: { label: "😟 担忧", color: "bg-amber-50 text-amber-600" },
-                      sad: { label: "😢 伤感", color: "bg-sky-50 text-sky-600" },
-                      angry: { label: "😤 生气", color: "bg-red-50 text-red-600" },
-                    };
-                    const mood = s.mood ? MOOD_MAP[s.mood] : null;
+                  {activeBindings.map((binding) => {
+                    const bindingSummaries = summaries.filter((s) => s.binding_id === binding.id);
+                    const latest = bindingSummaries[0];
+                    const mood = latest?.mood ? MOOD_MAP[latest.mood] : null;
 
                     return (
-                      <div key={s.id} className="px-5 py-3.5">
-                        <div className="flex items-center gap-2 mb-1.5">
-                          <span className="text-[10px] text-sand-400">
-                            {new Date(s.created_at).toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-                          </span>
-                          <span className="text-[10px] text-sand-300">·</span>
-                          <span className="text-[10px] text-sand-400">{s.message_count} 条消息</span>
-                          {mood && (
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${mood.color}`}>
-                              {mood.label}
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-sm text-sand-700 leading-relaxed">{s.summary}</p>
-                        {s.topics && (
-                          <div className="flex gap-1.5 mt-2 flex-wrap">
-                            {s.topics.split(",").map((t, j) => (
-                              <span key={j} className="text-[10px] bg-primary-50 text-primary-dark px-2 py-0.5 rounded-full">
-                                {t.trim()}
+                      <div key={binding.id} className="px-5 py-4">
+                        {/* Family member header */}
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-primary-light/60 to-primary/20 flex items-center justify-center">
+                              <span className="text-sm font-bold text-primary">
+                                {(binding.relationship_name || "家")[0]}
                               </span>
-                            ))}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <p className="text-sm font-semibold text-sand-800">{binding.relationship_name || "家人"}</p>
+                              {binding.parent_nickname && binding.parent_nickname !== binding.relationship_name && (
+                                <span className="text-[11px] text-sand-400">{binding.parent_nickname}</span>
+                              )}
+                              {mood && (
+                                <span className={`text-[10px] px-2 py-0.5 rounded-full ${mood.color}`}>
+                                  {mood.label}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => handleOpenChat(binding.id, binding.relationship_name || "家人")}
+                            className="flex items-center gap-1.5 text-xs text-primary hover:text-primary-dark font-medium cursor-pointer px-2.5 py-1.5 rounded-lg hover:bg-primary-50/60 transition-colors"
+                          >
+                            <MessageCircle size={13} />
+                            查看记录
+                          </button>
+                        </div>
+
+                        {/* Latest summary */}
+                        {latest ? (
+                          <div className="bg-sand-50/70 rounded-xl px-3.5 py-3">
+                            <p className="text-sm text-sand-700 leading-relaxed">{latest.summary}</p>
+                            <div className="flex items-center gap-2 mt-2">
+                              <span className="text-[10px] text-sand-400">
+                                {new Date(latest.created_at).toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                              </span>
+                              <span className="text-[10px] text-sand-300">·</span>
+                              <span className="text-[10px] text-sand-400">{latest.message_count} 条消息</span>
+                              {latest.topics && (
+                                <>
+                                  <span className="text-[10px] text-sand-300">·</span>
+                                  <div className="flex gap-1 flex-wrap">
+                                    {latest.topics.split(",").slice(0, 3).map((t, j) => (
+                                      <span key={j} className="text-[10px] bg-primary-50 text-primary-dark px-1.5 py-0.5 rounded-full">
+                                        {t.trim()}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                            {bindingSummaries.length > 1 && (
+                              <details className="mt-2">
+                                <summary className="text-[11px] text-sand-400 hover:text-sand-500 cursor-pointer select-none">
+                                  更早的 {bindingSummaries.length - 1} 条总结
+                                </summary>
+                                <div className="mt-2 space-y-2">
+                                  {bindingSummaries.slice(1, 4).map((s) => (
+                                    <div key={s.id} className="border-l-2 border-sand-200 pl-3 py-1">
+                                      <p className="text-xs text-sand-600 leading-relaxed">{s.summary}</p>
+                                      <span className="text-[10px] text-sand-400">
+                                        {new Date(s.created_at).toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </details>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="bg-sand-50/70 rounded-xl px-3.5 py-3 text-center">
+                            <p className="text-xs text-sand-400">
+                              {profile.summary_enabled
+                                ? `聊满 ${profile.summary_interval} 条消息后自动生成总结`
+                                : "对话总结已关闭"}
+                            </p>
                           </div>
                         )}
                       </div>
@@ -530,7 +633,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* ─── Right: Status sidebar (desktop only) ─── */}
+          {/* Right: Status sidebar (desktop only) */}
           <div className="hidden lg:block w-64 shrink-0 space-y-4 anim-slide-right" style={{ animationDelay: "100ms" }}>
             {/* Profile card */}
             <div className="bg-white rounded-2xl border border-sand-200/80 p-4">
@@ -574,7 +677,7 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* ─── Slide-over panel ─── */}
+      {/* Slide-over panel */}
       {activePanel && ActiveComponent && (
         <>
           <div className="fixed inset-0 z-40 bg-sand-900/10 backdrop-blur-[2px] anim-fade-in" onClick={handleClosePanel} />
@@ -590,6 +693,64 @@ export default function DashboardPage() {
             </div>
             <div className="p-6">
               <ActiveComponent />
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Chat history overlay — fixed, scroll-contained */}
+      {chatOverlay && (
+        <>
+          <div className="fixed inset-0 z-40 bg-sand-900/10 backdrop-blur-[2px] anim-fade-in" onClick={handleCloseChat} />
+          <div className="fixed right-0 top-0 bottom-0 z-50 w-full max-w-lg bg-white border-l border-sand-200 shadow-2xl shadow-sand-900/10 flex flex-col anim-slide-right">
+            {/* Fixed header */}
+            <div className="shrink-0 bg-white/90 backdrop-blur-md border-b border-sand-100 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <button onClick={handleCloseChat} className="text-sand-400 hover:text-sand-600 cursor-pointer p-1 rounded-lg hover:bg-sand-100 transition-colors">
+                  <ArrowLeft size={18} />
+                </button>
+                <div>
+                  <h2 className="font-semibold text-sand-800 text-sm">和{chatOverlay.name}的聊天记录</h2>
+                  <p className="text-[10px] text-sand-400">最近 50 条（只读）</p>
+                </div>
+              </div>
+              <button onClick={handleCloseChat} className="text-sand-400 hover:text-sand-600 cursor-pointer p-1.5 rounded-lg hover:bg-sand-100 transition-colors btn-press">
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Scrollable chat area */}
+            <div className="flex-1 overflow-y-auto overscroll-contain px-5 py-4">
+              {loadingChat ? (
+                <div className="flex justify-center py-12">
+                  <Loader2 className="w-6 h-6 animate-spin text-sand-300" />
+                </div>
+              ) : chatMessages.length === 0 ? (
+                <div className="text-center py-12 text-sand-400 text-sm">
+                  <MessageCircle className="w-10 h-10 mx-auto mb-3 text-sand-300" />
+                  暂无聊天记录
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {chatMessages.map((m, i) => (
+                    <div key={i} className={`flex ${m.role === "parent" ? "justify-start" : "justify-end"}`}>
+                      <div className={`max-w-[78%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed ${
+                        m.role === "parent"
+                          ? "bg-sand-100 text-sand-800 rounded-tl-sm"
+                          : "bg-primary/10 text-sand-800 rounded-tr-sm"
+                      }`}>
+                        <p>{m.content_text}</p>
+                        <p className="text-[10px] text-sand-400 mt-1 text-right">
+                          {new Date(m.created_at).toLocaleString("zh-CN", {
+                            month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+                          })}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                  <div ref={chatEndRef} />
+                </div>
+              )}
             </div>
           </div>
         </>

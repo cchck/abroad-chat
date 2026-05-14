@@ -10,7 +10,7 @@ export default function NotificationsPanel() {
 
   useEffect(() => {
     api.getNotifications().then((n) => {
-      setNotifications(n as unknown as AppNotification[]);
+      setNotifications(n);
       setLoading(false);
     });
   }, []);

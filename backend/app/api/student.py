@@ -8,6 +8,8 @@ from app.models.models import (
     Binding,
     ChatSummary,
     ContextMaterial,
+    Conversation,
+    Message,
     Notification,
     PersonaConfig,
     Student,
@@ -17,6 +19,7 @@ from app.schemas.schemas import (
     ApiKeysOut,
     ApiKeysUpdate,
     BindingOut,
+    ChatMessageOut,
     ChatSummaryOut,
     InviteCreate,
     InviteOut,
@@ -31,6 +34,7 @@ from app.schemas.schemas import (
     VoiceModelIdUpdate,
     VoiceProfileOut,
 )
+from app.core.crypto import decrypt, encrypt
 from app.services.llm_provider import PROVIDERS, chat_completion
 from app.services.voice_service import VoiceService
 
@@ -90,14 +94,14 @@ async def update_api_keys(
 ):
     if data.llm_provider is not None:
         if data.llm_provider not in PROVIDERS:
-            raise HTTPException(status_code=400, detail=f"Unsupported provider. Choose from: {list(PROVIDERS.keys())}")
+            raise HTTPException(status_code=400, detail=f"不支持该模型提供商，可选：{', '.join(PROVIDERS.keys())}")
         student.llm_provider = data.llm_provider
     if data.llm_model is not None:
         student.llm_model = data.llm_model
     if data.llm_api_key is not None:
-        student.llm_api_key = data.llm_api_key
+        student.llm_api_key = encrypt(data.llm_api_key)
     if data.fish_audio_api_key is not None:
-        student.fish_audio_api_key = data.fish_audio_api_key
+        student.fish_audio_api_key = encrypt(data.fish_audio_api_key)
     await db.commit()
     await db.refresh(student)
 
@@ -125,11 +129,21 @@ async def upload_voice(
     if not student.fish_audio_api_key:
         raise HTTPException(status_code=400, detail="请先在设置中填写 Fish Audio API Key")
 
-    audio_data = await file.read()
-    if len(audio_data) > 50 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large (max 50MB)")
+    # #5: Stream-read with size limit instead of reading entire file into memory
+    max_size = 50 * 1024 * 1024
+    chunks = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 256)  # 256KB chunks
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            raise HTTPException(status_code=400, detail="文件过大，最大支持 50MB")
+        chunks.append(chunk)
+    audio_data = b"".join(chunks)
 
-    svc = VoiceService(api_key=student.fish_audio_api_key)
+    svc = VoiceService(api_key=decrypt(student.fish_audio_api_key))
     model_id = await svc.clone_voice(audio_data, student.name)
 
     result = await db.execute(
@@ -258,7 +272,7 @@ async def analyze_chat_history(
 
     response = await chat_completion(
         provider=student.llm_provider or "anthropic",
-        api_key=student.llm_api_key,
+        api_key=decrypt(student.llm_api_key),
         model=student.llm_model,
         system_prompt=system_prompt,
         messages=[{"role": "user", "content": f"请分析以下聊天记录：\n\n{text}"}],
@@ -324,7 +338,7 @@ async def delete_material(
 ):
     material = await db.get(ContextMaterial, material_id)
     if not material or material.student_id != student.id:
-        raise HTTPException(status_code=404)
+        raise HTTPException(status_code=404, detail="素材不存在")
     await db.delete(material)
     await db.commit()
     return {"ok": True}
@@ -398,7 +412,7 @@ async def mark_notification_read(
 ):
     notif = await db.get(Notification, notification_id)
     if not notif or notif.student_id != student.id:
-        raise HTTPException(status_code=404)
+        raise HTTPException(status_code=404, detail="通知不存在")
     notif.is_read = True
     await db.commit()
     return {"ok": True}
@@ -416,7 +430,7 @@ async def update_summary_settings(
         student.summary_enabled = data.summary_enabled
     if data.summary_interval is not None:
         if data.summary_interval not in (10, 20, 50):
-            raise HTTPException(status_code=400, detail="interval must be 10, 20, or 50")
+            raise HTTPException(status_code=400, detail="摘要间隔只能选 10、20 或 50 条")
         student.summary_interval = data.summary_interval
     await db.commit()
     await db.refresh(student)
@@ -440,3 +454,36 @@ async def list_summaries(
         .limit(30)
     )
     return list(result.scalars().all())
+
+
+# ──── Chat History (read-only) ────
+
+@router.get("/chat-history/{binding_id}", response_model=list[ChatMessageOut])
+async def get_chat_history(
+    binding_id: int,
+    student: Student = Depends(get_current_student),
+    db: AsyncSession = Depends(get_db),
+):
+    binding = await db.get(Binding, binding_id)
+    if not binding or binding.student_id != student.id:
+        raise HTTPException(status_code=404, detail="绑定关系不存在")
+
+    result = await db.execute(
+        select(Conversation)
+        .where(Conversation.binding_id == binding_id)
+        .order_by(Conversation.created_at.desc())
+        .limit(1)
+    )
+    conv = result.scalar_one_or_none()
+    if not conv:
+        return []
+
+    result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conv.id)
+        .order_by(Message.created_at.desc())
+        .limit(50)
+    )
+    messages = list(result.scalars().all())
+    messages.reverse()
+    return messages

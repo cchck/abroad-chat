@@ -26,7 +26,7 @@ async function request<T>(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail || `Request failed: ${res.status}`);
+    throw new Error(body.detail || "请求失败，请稍后再试");
   }
 
   return res.json();
@@ -107,7 +107,7 @@ export const api = {
 
   getBindings: () => request<Binding[]>("/student/bindings"),
 
-  getNotifications: () => request<Notification[]>("/student/notifications"),
+  getNotifications: () => request<AppNotification[]>("/student/notifications"),
 
   markNotificationRead: (id: number) =>
     request<{ ok: boolean }>(`/student/notifications/${id}/read`, {
@@ -121,6 +121,9 @@ export const api = {
     }),
 
   getSummaries: () => request<ChatSummary[]>("/student/summaries"),
+
+  getChatHistory: (bindingId: number) =>
+    request<ChatHistoryMessage[]>(`/student/chat-history/${bindingId}`),
 
   getVoiceStatus: () => request<VoiceProfile | null>("/student/voice/status"),
 
@@ -141,7 +144,7 @@ export const api = {
     }).then(async (res) => {
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body.detail || "Upload failed");
+        throw new Error(body.detail || "上传失败，请稍后再试");
       }
       return res.json() as Promise<VoiceProfile>;
     });
@@ -238,6 +241,14 @@ export interface ChatSummary {
   summary: string;
   topics: string | null;
   mood: string | null;
+  created_at: string;
+}
+
+export interface ChatHistoryMessage {
+  role: string;
+  content_text: string;
+  content_voice_url: string | null;
+  emotion_tag: string | null;
   created_at: string;
 }
 

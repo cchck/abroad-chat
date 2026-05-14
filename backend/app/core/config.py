@@ -12,6 +12,12 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
 
+    ENCRYPTION_KEY: str = ""  # Fernet key for encrypting API keys in DB
+
+    CORS_ORIGINS: str = "http://localhost:3000"  # comma-separated allowed origins
+
+    FISH_AUDIO_BASE_URL: str = "https://api.fish.audio"
+
     WECHAT_APP_ID: str = ""
     WECHAT_APP_SECRET: str = ""
     WECHAT_TOKEN: str = ""

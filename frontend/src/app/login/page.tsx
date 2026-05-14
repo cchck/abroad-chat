@@ -8,17 +8,27 @@ import { Loader2 } from "lucide-react";
 export default function LoginPage() {
   const router = useRouter();
   const [isRegister, setIsRegister] = useState(false);
-  const [form, setForm] = useState({ email: "", password: "", name: "" });
+  const [form, setForm] = useState({ email: "", password: "", name: "", confirmPassword: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    if (isRegister) {
+      if (form.password.length < 8) {
+        setError("密码至少需要 8 个字符");
+        return;
+      }
+      if (form.password !== form.confirmPassword) {
+        setError("两次输入的密码不一致");
+        return;
+      }
+    }
     setLoading(true);
     try {
       const result = isRegister
-        ? await api.register(form)
+        ? await api.register({ email: form.email, password: form.password, name: form.name })
         : await api.login({ email: form.email, password: form.password });
       localStorage.setItem("token", result.access_token);
       router.push("/dashboard");
@@ -78,9 +88,29 @@ export default function LoginPage() {
                 value={form.password}
                 onChange={(e) => setForm({ ...form, password: e.target.value })}
                 className="w-full px-3.5 py-2.5 rounded-xl border border-sand-200 text-sm bg-sand-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50 transition-all"
-                placeholder="••••••••"
+                placeholder={isRegister ? "至少 8 个字符" : "••••••••"}
               />
             </div>
+            {isRegister && (
+              <div>
+                <label className="block text-sm text-sand-500 mb-1.5">确认密码</label>
+                <input
+                  type="password"
+                  required
+                  value={form.confirmPassword}
+                  onChange={(e) => setForm({ ...form, confirmPassword: e.target.value })}
+                  className={`w-full px-3.5 py-2.5 rounded-xl border text-sm bg-sand-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all ${
+                    form.confirmPassword && form.confirmPassword !== form.password
+                      ? "border-danger/50 focus:border-danger/50 focus:ring-danger/20"
+                      : "border-sand-200 focus:border-primary/50"
+                  }`}
+                  placeholder="再输一遍密码"
+                />
+                {form.confirmPassword && form.confirmPassword !== form.password && (
+                  <p className="text-xs text-danger mt-1">两次密码不一致</p>
+                )}
+              </div>
+            )}
 
             {error && (
               <p className="text-sm text-danger bg-red-50 px-3 py-2 rounded-xl">{error}</p>
