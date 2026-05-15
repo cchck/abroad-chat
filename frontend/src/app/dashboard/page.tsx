@@ -16,6 +16,7 @@ import {
   type Material,
   type Binding,
   type ChatHistoryMessage,
+  type UsageStats,
 } from "@/lib/api";
 import {
   User, Key, MessageSquare, FileText, Users, Bell,
@@ -70,6 +71,9 @@ export default function DashboardPage() {
   const [summaries, setSummaries] = useState<ChatSummary[]>([]);
   const [loadingSummaries, setLoadingSummaries] = useState(true);
   const [savingSummary, setSavingSummary] = useState(false);
+  const [savingSearch, setSavingSearch] = useState(false);
+  const [searchStats, setSearchStats] = useState({ search_count: 0, input_tokens: 0, output_tokens: 0 });
+  const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
   const [bindings, setBindings] = useState<Binding[]>([]);
   const [loadingBindings, setLoadingBindings] = useState(true);
 
@@ -106,6 +110,12 @@ export default function DashboardPage() {
     api.getBindings()
       .then((b) => { setBindings(b); setLoadingBindings(false); })
       .catch(() => setLoadingBindings(false));
+    api.getSearchStats()
+      .then(setSearchStats)
+      .catch(() => {});
+    api.getUsageStats()
+      .then(setUsageStats)
+      .catch(() => {});
   }, [router, refreshProfile]);
 
   const handleLogout = () => {
@@ -469,6 +479,88 @@ export default function DashboardPage() {
               </div>
             </div>
 
+            {/* ── Token Usage ── */}
+            {usageStats && usageStats.total_messages > 0 && (
+              <div className="bg-white rounded-2xl border border-sand-200/80 overflow-hidden anim-slide-up" style={{ animationDelay: "150ms" }}>
+                <div className="px-5 py-4 border-b border-sand-100">
+                  <div className="flex items-center gap-2">
+                    <Sparkles size={16} className="text-amber-500" />
+                    <h2 className="font-semibold text-sand-800 text-sm">本月用量</h2>
+                    <span className="text-[10px] text-sand-400 ml-auto">{usageStats.month}</span>
+                  </div>
+                </div>
+                <div className="px-5 py-4">
+                  {/* Summary numbers */}
+                  <div className="grid grid-cols-3 gap-3 mb-4">
+                    <div className="bg-sand-50/70 rounded-xl px-3 py-2.5 text-center">
+                      <p className="text-lg font-bold text-sand-800">{usageStats.total_messages}</p>
+                      <p className="text-[10px] text-sand-400">AI 回复</p>
+                    </div>
+                    <div className="bg-sand-50/70 rounded-xl px-3 py-2.5 text-center">
+                      <p className="text-lg font-bold text-sand-800">
+                        {((usageStats.total_input_tokens + usageStats.total_output_tokens) / 1000).toFixed(1)}k
+                      </p>
+                      <p className="text-[10px] text-sand-400">总 Tokens</p>
+                    </div>
+                    <div className="bg-sand-50/70 rounded-xl px-3 py-2.5 text-center">
+                      <p className="text-lg font-bold text-sand-800">
+                        {(usageStats.total_output_tokens / 1000).toFixed(1)}k
+                      </p>
+                      <p className="text-[10px] text-sand-400">输出 Tokens</p>
+                    </div>
+                  </div>
+
+                  {/* Daily bar chart */}
+                  {usageStats.daily.length > 1 && (
+                    <div className="mb-4">
+                      <p className="text-[11px] text-sand-500 mb-2">每日用量</p>
+                      <div className="flex items-end gap-[3px] h-16">
+                        {usageStats.daily.map((d) => {
+                          const total = d.input_tokens + d.output_tokens;
+                          const max = Math.max(...usageStats.daily.map((x) => x.input_tokens + x.output_tokens));
+                          const pct = max > 0 ? (total / max) * 100 : 0;
+                          return (
+                            <div key={d.date} className="flex-1 flex flex-col items-center gap-1 group relative">
+                              <div
+                                className="w-full bg-primary/20 rounded-sm hover:bg-primary/40 transition-colors min-h-[2px]"
+                                style={{ height: `${Math.max(pct, 3)}%` }}
+                              />
+                              <div className="hidden group-hover:block absolute -top-8 bg-sand-800 text-white text-[10px] px-2 py-1 rounded whitespace-nowrap z-10">
+                                {d.date.slice(5)} · {((total) / 1000).toFixed(1)}k
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Per-family breakdown */}
+                  {usageStats.by_family.length > 0 && (
+                    <div>
+                      <p className="text-[11px] text-sand-500 mb-2">按家人</p>
+                      <div className="space-y-1.5">
+                        {usageStats.by_family.map((f) => {
+                          const total = f.input_tokens + f.output_tokens;
+                          const allTotal = usageStats.total_input_tokens + usageStats.total_output_tokens;
+                          const pct = allTotal > 0 ? (total / allTotal) * 100 : 0;
+                          return (
+                            <div key={f.name} className="flex items-center gap-2">
+                              <span className="text-xs text-sand-600 w-12 shrink-0 truncate">{f.name}</span>
+                              <div className="flex-1 bg-sand-100 rounded-full h-2 overflow-hidden">
+                                <div className="bg-primary/50 h-full rounded-full transition-all" style={{ width: `${pct}%` }} />
+                              </div>
+                              <span className="text-[10px] text-sand-400 w-12 text-right shrink-0">{(total / 1000).toFixed(1)}k</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* ── Family Cards: chat history + summaries ── */}
             <div className="bg-white rounded-2xl border border-sand-200/80 overflow-hidden anim-slide-up" style={{ animationDelay: "180ms" }}>
               <div className="px-5 py-4 border-b border-sand-100">
@@ -517,6 +609,46 @@ export default function DashboardPage() {
                     ? `开启中 — AI 每和家人聊 ${profile.summary_interval} 条消息，自动生成一段对话摘要给你`
                     : "已关闭 — 开启后，AI 会定期总结和家人的聊天内容，方便你快速了解"}
                 </p>
+                <div className="flex items-center justify-between mt-3 pt-3 border-t border-sand-100">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <Sparkles size={12} className="text-amber-500" />
+                      <span className="text-xs font-medium text-sand-700">联网搜索</span>
+                    </div>
+                    <p className="text-[11px] text-sand-400 mt-0.5">
+                      {profile.search_enabled
+                        ? "开启中 — 家长问天气、新闻等事实性问题时，AI 会联网查找后回答（每次搜索额外消耗一次 LLM 调用）"
+                        : "已关闭 — 开启后，AI 遇到不确定的事实性问题时会联网搜索，回答更准确"}
+                    </p>
+                    {profile.search_enabled && (
+                      <p className="text-[10px] text-sand-400 mt-1">
+                        本月搜索 <span className="font-medium text-sand-600">{searchStats.search_count}</span> 次
+                        {searchStats.search_count > 0 && (
+                          <span className="ml-2">
+                            · 消耗 <span className="font-medium text-sand-600">{((searchStats.input_tokens + searchStats.output_tokens) / 1000).toFixed(1)}k</span> tokens
+                          </span>
+                        )}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={async () => {
+                      setSavingSearch(true);
+                      try {
+                        await api.updateSearchSettings(!profile.search_enabled);
+                        refreshProfile();
+                      } finally { setSavingSearch(false); }
+                    }}
+                    disabled={savingSearch}
+                    className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer shrink-0 ml-3 ${
+                      profile.search_enabled ? "bg-success" : "bg-sand-300"
+                    } ${savingSearch ? "opacity-50" : ""}`}
+                  >
+                    <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${
+                      profile.search_enabled ? "left-[18px]" : "left-0.5"
+                    }`} />
+                  </button>
+                </div>
               </div>
 
               {loadingBindings || loadingSummaries ? (

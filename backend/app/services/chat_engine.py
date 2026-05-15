@@ -16,10 +16,12 @@ from app.models.models import (
     Message,
     Notification,
     PersonaConfig,
+    SearchLog,
     Student,
 )
 from app.core.crypto import decrypt
 from app.services.llm_provider import chat_completion
+from app.services.search_service import web_search
 
 SYSTEM_PROMPT_TEMPLATE = """你是{student_name}，正在微信上和{relationship}聊天。
 
@@ -68,7 +70,19 @@ SYSTEM_PROMPT_TEMPLATE = """你是{student_name}，正在微信上和{relationsh
 ## 输出格式
 必须返回合法 JSON：{{"text": "回复内容", "emotion": "情绪标签", "sensitivity": 0}}
 emotion 可选值：neutral / warm / playful / concerned / excited
-sensitivity 含义：0=普通 1=轻微敏感 2=需通知学生 3=紧急"""
+sensitivity 含义：0=普通 1=轻微敏感 2=需通知学生 3=紧急
+{search_instructions}"""
+
+SEARCH_INSTRUCTIONS = """
+## 联网搜索
+如果{relationship}问了你不确定的事实性问题（天气、新闻、时事等），你可以请求联网搜索。
+在 JSON 中额外加一个字段：{{"text": "你的回复", "emotion": "...", "sensitivity": 0, "search_query": "搜索关键词"}}
+- 只在确实需要事实信息时才加 search_query，日常闲聊不要搜索
+- search_query 用简短的搜索关键词，比如"波士顿今天天气"、"2026年五一放假安排"
+- 如果不需要搜索，不要加 search_query 字段
+- 加了 search_query 时，text 可以先写一个临时回复（搜索到结果后会让你重新回答）"""
+
+NO_SEARCH_INSTRUCTIONS = ""
 
 
 class ChatEngine:
@@ -89,9 +103,12 @@ class ChatEngine:
         background_materials = await self._get_background_materials(student.id)
         parent_info = await self._get_parent_shared_info(student.id)
         conversation = await self._get_or_create_conversation(binding_id)
-        history = await self._get_recent_messages(conversation.id, limit=20)
+        history = await self._get_recent_messages(conversation.id, limit=10)
 
-        system_prompt = self._build_system_prompt(student, persona, binding, proactive_materials, background_materials, parent_info)
+        system_prompt = self._build_system_prompt(
+            student, persona, binding, proactive_materials, background_materials, parent_info,
+            search_enabled=student.search_enabled,
+        )
 
         await self._save_message(conversation.id, "parent", parent_text)
 
@@ -113,6 +130,33 @@ class ChatEngine:
         )
 
         parsed = self._parse_response(response.text)
+
+        if student.search_enabled and parsed.get("search_query"):
+            search_query = parsed["search_query"]
+            logger.info("web search triggered: student=%d query=%s", student.id, search_query)
+            search_results = await web_search(search_query)
+            if search_results:
+                messages.append({"role": "assistant", "content": response.text})
+                messages.append({
+                    "role": "user",
+                    "content": f"[搜索结果]\n{search_results}\n\n根据以上搜索结果，重新用你的说话风格回答{binding.relationship_name or '家长'}的问题。记住你是{student.name}，不要暴露搜索过程，就像你本来就知道这些信息一样。必须返回合法 JSON。",
+                })
+                response = await chat_completion(
+                    provider=student.llm_provider,
+                    api_key=llm_api_key,
+                    model=student.llm_model,
+                    system_prompt=system_prompt,
+                    messages=messages,
+                )
+                parsed = self._parse_response(response.text)
+            # Log search with token usage from the extra LLM call
+            self.db.add(SearchLog(
+                student_id=student.id,
+                query=search_query,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+            ))
+            await self.db.flush()
         logger.info("llm response: emotion=%s sensitivity=%d", parsed.get("emotion"), parsed.get("sensitivity", 0))
 
         ai_msg = await self._save_message(
@@ -121,6 +165,8 @@ class ChatEngine:
             parsed["text"],
             emotion_tag=parsed["emotion"],
             sensitivity_level=parsed["sensitivity"],
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
         )
         parsed["_ai_message"] = ai_msg
 
@@ -141,6 +187,7 @@ class ChatEngine:
         proactive_materials: list[ContextMaterial],
         background_materials: list[ContextMaterial],
         parent_info: list[ContextMaterial],
+        search_enabled: bool = False,
     ) -> str:
         style = ""
         samples = "暂无"
@@ -159,9 +206,12 @@ class ChatEngine:
         background_text = "\n".join(f"- {m.content}" for m in background_materials[:10]) if background_materials else "暂无"
         parent_text = "\n".join(f"- {m.content}" for m in parent_info[:10]) if parent_info else "暂无"
 
+        relationship = binding.relationship_name or "家长"
+        search_instructions = SEARCH_INSTRUCTIONS.format(relationship=relationship) if search_enabled else NO_SEARCH_INSTRUCTIONS
+
         return SYSTEM_PROMPT_TEMPLATE.format(
             student_name=student.name,
-            relationship=binding.relationship_name or "家长",
+            relationship=relationship,
             speaking_style=style or "自然随意的聊天风格",
             chat_samples=samples,
             school=student.school or "未知",
@@ -171,6 +221,7 @@ class ChatEngine:
             proactive_materials=proactive_text,
             background_materials=background_text,
             parent_shared_info=parent_text,
+            search_instructions=search_instructions,
         )
 
     def _parse_response(self, raw: str) -> dict:
@@ -269,6 +320,8 @@ class ChatEngine:
         text: str,
         emotion_tag: str | None = None,
         sensitivity_level: int = 0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
     ) -> Message:
         msg = Message(
             conversation_id=conversation_id,
@@ -276,6 +329,8 @@ class ChatEngine:
             content_text=text,
             emotion_tag=emotion_tag,
             sensitivity_level=sensitivity_level,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
         self.db.add(msg)
         await self.db.flush()

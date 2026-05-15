@@ -31,6 +31,8 @@ PROVIDERS = {
 @dataclass
 class LLMResponse:
     text: str
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 async def chat_completion(
@@ -73,7 +75,11 @@ async def _call_anthropic(
         raise HTTPException(status_code=429, detail="AI 调用太频繁，请稍后再试")
     except (anthropic.APIError, anthropic.APIConnectionError):
         raise HTTPException(status_code=502, detail="AI 服务暂时不可用，请稍后再试")
-    return LLMResponse(text=response.content[0].text)
+    return LLMResponse(
+        text=response.content[0].text,
+        input_tokens=response.usage.input_tokens,
+        output_tokens=response.usage.output_tokens,
+    )
 
 
 async def _call_openai_compatible(
@@ -108,7 +114,12 @@ async def _call_openai_compatible(
                 raise HTTPException(status_code=429, detail="AI 调用太频繁，请稍后再试")
             response.raise_for_status()
             data = response.json()
-            return LLMResponse(text=data["choices"][0]["message"]["content"])
+            usage = data.get("usage", {})
+            return LLMResponse(
+                text=data["choices"][0]["message"]["content"],
+                input_tokens=usage.get("prompt_tokens", 0),
+                output_tokens=usage.get("completion_tokens", 0),
+            )
     except HTTPException:
         raise
     except httpx.TimeoutException:

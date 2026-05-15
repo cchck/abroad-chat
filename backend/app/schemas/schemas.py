@@ -57,6 +57,7 @@ class StudentProfileOut(BaseModel):
     llm_model: str | None
     has_llm_key: bool = False
     has_fish_key: bool = False
+    search_enabled: bool = False
     summary_enabled: bool = True
     summary_interval: int = 20
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type Binding } from "@/lib/api";
-import { Plus, Loader2, Copy, Check, Users } from "lucide-react";
+import { Plus, Loader2, Copy, Check, Users, Trash2 } from "lucide-react";
 
 export default function BindingsPanel() {
   const [bindings, setBindings] = useState<Binding[]>([]);
@@ -34,6 +34,18 @@ export default function BindingsPanel() {
     navigator.clipboard.writeText(code);
     setCopied(id);
     setTimeout(() => setCopied(null), 2000);
+  };
+
+  const handleDelete = async (b: Binding) => {
+    const label = b.relationship_name || "该家人";
+    const warning = b.status === "active"
+      ? `确定要解绑「${label}」吗？解绑后对话记录和总结将被清除，且无法恢复。`
+      : `确定要删除「${label}」的邀请码吗？`;
+    if (!window.confirm(warning)) return;
+    try {
+      await api.deleteBinding(b.id);
+      load();
+    } catch { /* ignore */ }
   };
 
   return (
@@ -108,6 +120,13 @@ export default function BindingsPanel() {
                   className="text-sand-400 hover:text-sand-600 cursor-pointer p-1"
                 >
                   {copied === b.id ? <Check size={14} className="text-success" /> : <Copy size={14} />}
+                </button>
+                <button
+                  onClick={() => handleDelete(b)}
+                  className="text-sand-300 hover:text-danger cursor-pointer p-1 transition-colors"
+                  title={b.status === "active" ? "解绑" : "删除"}
+                >
+                  <Trash2 size={14} />
                 </button>
               </div>
             </div>

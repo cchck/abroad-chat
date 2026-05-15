@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -12,6 +12,7 @@ from app.models.models import (
     Message,
     Notification,
     PersonaConfig,
+    SearchLog,
     Student,
     VoiceProfile,
 )
@@ -388,6 +389,22 @@ async def list_bindings(
     return out
 
 
+# ──── Unbind ────
+
+@router.delete("/bindings/{binding_id}")
+async def delete_binding(
+    binding_id: int,
+    student: Student = Depends(get_current_student),
+    db: AsyncSession = Depends(get_db),
+):
+    binding = await db.get(Binding, binding_id)
+    if not binding or binding.student_id != student.id:
+        raise HTTPException(status_code=404, detail="绑定关系不存在")
+    await db.delete(binding)
+    await db.commit()
+    return {"ok": True}
+
+
 # ──── Notifications ────
 
 @router.get("/notifications", response_model=list[NotificationOut])
@@ -437,6 +454,132 @@ async def update_summary_settings(
     return {
         "summary_enabled": student.summary_enabled,
         "summary_interval": student.summary_interval,
+    }
+
+
+# ──── Search Settings ────
+
+@router.put("/search-settings")
+async def update_search_settings(
+    enabled: bool,
+    student: Student = Depends(get_current_student),
+    db: AsyncSession = Depends(get_db),
+):
+    student.search_enabled = enabled
+    await db.commit()
+    return {"search_enabled": student.search_enabled}
+
+
+@router.get("/search-stats")
+async def get_search_stats(
+    student: Student = Depends(get_current_student),
+    db: AsyncSession = Depends(get_db),
+):
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    result = await db.execute(
+        select(
+            func.count(),
+            func.coalesce(func.sum(SearchLog.input_tokens), 0),
+            func.coalesce(func.sum(SearchLog.output_tokens), 0),
+        ).where(
+            SearchLog.student_id == student.id,
+            SearchLog.created_at >= month_start,
+        )
+    )
+    row = result.one()
+    return {
+        "month": now.strftime("%Y-%m"),
+        "search_count": row[0],
+        "input_tokens": row[1],
+        "output_tokens": row[2],
+    }
+
+
+# ──── Token Usage ────
+
+@router.get("/usage-stats")
+async def get_usage_stats(
+    student: Student = Depends(get_current_student),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get token usage stats for the current month, broken down by day."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    # Monthly totals
+    result = await db.execute(
+        select(
+            func.count(),
+            func.coalesce(func.sum(Message.input_tokens), 0),
+            func.coalesce(func.sum(Message.output_tokens), 0),
+        )
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .join(Binding, Conversation.binding_id == Binding.id)
+        .where(
+            Binding.student_id == student.id,
+            Message.role == "ai",
+            Message.created_at >= month_start,
+        )
+    )
+    row = result.one()
+    total_messages = row[0]
+    total_input = row[1]
+    total_output = row[2]
+
+    # Daily breakdown (last 30 days)
+    from sqlalchemy import cast, Date
+    result = await db.execute(
+        select(
+            cast(Message.created_at, Date).label("day"),
+            func.coalesce(func.sum(Message.input_tokens), 0),
+            func.coalesce(func.sum(Message.output_tokens), 0),
+        )
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .join(Binding, Conversation.binding_id == Binding.id)
+        .where(
+            Binding.student_id == student.id,
+            Message.role == "ai",
+            Message.created_at >= month_start,
+        )
+        .group_by("day")
+        .order_by("day")
+    )
+    daily = [
+        {"date": str(r[0]), "input_tokens": r[1], "output_tokens": r[2]}
+        for r in result.all()
+    ]
+
+    # Per-family breakdown
+    result = await db.execute(
+        select(
+            Binding.relationship_name,
+            func.coalesce(func.sum(Message.input_tokens), 0),
+            func.coalesce(func.sum(Message.output_tokens), 0),
+        )
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .join(Binding, Conversation.binding_id == Binding.id)
+        .where(
+            Binding.student_id == student.id,
+            Message.role == "ai",
+            Message.created_at >= month_start,
+        )
+        .group_by(Binding.relationship_name)
+    )
+    by_family = [
+        {"name": r[0] or "家人", "input_tokens": r[1], "output_tokens": r[2]}
+        for r in result.all()
+    ]
+
+    return {
+        "month": now.strftime("%Y-%m"),
+        "total_messages": total_messages,
+        "total_input_tokens": total_input,
+        "total_output_tokens": total_output,
+        "daily": daily,
+        "by_family": by_family,
     }
 
 

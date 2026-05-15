@@ -107,6 +107,9 @@ export const api = {
 
   getBindings: () => request<Binding[]>("/student/bindings"),
 
+  deleteBinding: (id: number) =>
+    request<{ ok: boolean }>(`/student/bindings/${id}`, { method: "DELETE" }),
+
   getNotifications: () => request<AppNotification[]>("/student/notifications"),
 
   markNotificationRead: (id: number) =>
@@ -119,6 +122,17 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(data),
     }),
+
+  updateSearchSettings: (enabled: boolean) =>
+    request<{ search_enabled: boolean }>(`/student/search-settings?enabled=${enabled}`, {
+      method: "PUT",
+    }),
+
+  getSearchStats: () =>
+    request<SearchStats>("/student/search-stats"),
+
+  getUsageStats: () =>
+    request<UsageStats>("/student/usage-stats"),
 
   getSummaries: () => request<ChatSummary[]>("/student/summaries"),
 
@@ -164,6 +178,7 @@ export interface StudentProfile {
   llm_model: string | null;
   has_llm_key: boolean;
   has_fish_key: boolean;
+  search_enabled: boolean;
   summary_enabled: boolean;
   summary_interval: number;
 }
@@ -250,6 +265,22 @@ export interface ChatHistoryMessage {
   content_voice_url: string | null;
   emotion_tag: string | null;
   created_at: string;
+}
+
+export interface UsageStats {
+  month: string;
+  total_messages: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  daily: { date: string; input_tokens: number; output_tokens: number }[];
+  by_family: { name: string; input_tokens: number; output_tokens: number }[];
+}
+
+export interface SearchStats {
+  month: string;
+  search_count: number;
+  input_tokens: number;
+  output_tokens: number;
 }
 
 export interface VoiceProfile {

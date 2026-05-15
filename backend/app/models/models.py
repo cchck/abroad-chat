@@ -28,6 +28,7 @@ class Student(Base):
     llm_model: Mapped[str | None] = mapped_column(String(100))
     llm_api_key: Mapped[str | None] = mapped_column(String(500))
     fish_audio_api_key: Mapped[str | None] = mapped_column(String(500))
+    search_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     summary_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     summary_interval: Mapped[int] = mapped_column(Integer, default=20)  # 10 / 20 / 50
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -37,6 +38,7 @@ class Student(Base):
     bindings: Mapped[list["Binding"]] = relationship(back_populates="student", cascade="all, delete-orphan")
     materials: Mapped[list["ContextMaterial"]] = relationship(back_populates="student", cascade="all, delete-orphan")
     notifications: Mapped[list["Notification"]] = relationship(back_populates="student", cascade="all, delete-orphan")
+    search_logs: Mapped[list["SearchLog"]] = relationship(back_populates="student", cascade="all, delete-orphan")
     summaries: Mapped[list["ChatSummary"]] = relationship(back_populates="student", cascade="all, delete-orphan")
 
 
@@ -128,6 +130,8 @@ class Message(Base):
     content_voice_url: Mapped[str | None] = mapped_column(String(500))
     emotion_tag: Mapped[str | None] = mapped_column(String(20))
     sensitivity_level: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")
@@ -146,6 +150,19 @@ class Notification(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     student: Mapped["Student"] = relationship(back_populates="notifications")
+
+
+class SearchLog(Base):
+    __tablename__ = "search_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    student_id: Mapped[int] = mapped_column(ForeignKey("students.id", ondelete="CASCADE"), index=True)
+    query: Mapped[str] = mapped_column(String(500))
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    student: Mapped["Student"] = relationship(back_populates="search_logs")
 
 
 class ChatSummary(Base):
